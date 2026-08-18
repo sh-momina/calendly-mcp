@@ -5,7 +5,7 @@
     "api/chat.js": { "maxDuration": 60 }
   },
   "rewrites": [
-    { "source": "/mcp", "destination": "/api/index" },
-    { "source": "/health", "destination": "/api/index" }
+    { "source": "/api/chat", "destination": "/api/chat" },
+    { "source": "/(.*)", "destination": "/api/index" }
   ]
 }
