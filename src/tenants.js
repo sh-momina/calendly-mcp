@@ -18,10 +18,13 @@ export function loadTenants() {
 
   const add = (apiKey, calendlyToken, label) => {
     if (!apiKey || !calendlyToken) return;
-    if (String(apiKey).length < 16) {
+    // Copy/paste from dashboards routinely carries trailing spaces or newlines.
+    const key = String(apiKey).trim();
+    const token = String(calendlyToken).trim();
+    if (key.length < 16) {
       console.warn(`[tenants] api key for "${label ?? 'default'}" is short — use at least 32 random characters.`);
     }
-    tenants.set(String(apiKey), { calendlyToken: String(calendlyToken), label: label ?? 'default' });
+    tenants.set(key, { calendlyToken: token, label: label ?? 'default', keyLength: key.length });
   };
 
   add(process.env.MCP_API_KEY, process.env.CALENDLY_TOKEN, 'default');
