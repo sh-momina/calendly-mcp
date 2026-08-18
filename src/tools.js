@@ -215,6 +215,24 @@ export function registerCalendlyTools(server, getToken) {
       const { location, error } = buildLocation(eventType, args);
       if (error) return fail(error);
 
+      // Calendly rejects a start_time that is not a live open slot with a
+      // generic "parameters are invalid". Check first so the agent gets a
+      // usable answer instead of that.
+      const windowStart = new Date(Math.max(Date.now() + 2 * 6e4, new Date(when.iso).getTime() - 6e4));
+      const windowEnd = new Date(new Date(when.iso).getTime() + 2 * 36e5);
+      const openSlots = await client.availableTimes(eventType.uri, windowStart.toISOString(), windowEnd.toISOString());
+      const target = new Date(when.iso).getTime();
+
+      if (!openSlots.some((s) => new Date(s.start_time).getTime() === target)) {
+        const nearby = openSlots.slice(0, 3).map((s) => `${speak(s.start_time, tz)} (start_time: ${s.start_time})`);
+        return fail(
+          `${speak(when.iso, tz)} is not an open slot, so nothing was booked. ` +
+            (nearby.length
+              ? `Openings around that time: ${nearby.join('; ')}. Offer one of these.`
+              : `There is nothing open within two hours of it. Check the date is right — ${speak(when.iso, tz)} is a ${new Date(when.iso).toLocaleDateString('en-US', { weekday: 'long', timeZone: tz })} — then call find_available_times for a wider window.`)
+        );
+      }
+
       const payload = {
         event_type: eventType.uri,
         start_time: when.iso,
