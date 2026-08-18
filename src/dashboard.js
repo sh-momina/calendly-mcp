@@ -281,6 +281,7 @@ async function send(text) {
         openaiKey: $('oai').value.trim(),
         model: $('model').value.trim(),
         systemPrompt: $('prompt').value,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         messages: history
       })
     });
