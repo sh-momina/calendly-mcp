@@ -3,12 +3,19 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { registerCalendlyTools } from './tools.js';
 import { loadTenants } from './tenants.js';
+import { DASHBOARD_HTML } from './dashboard.js';
 
 const PORT = process.env.PORT || 3000;
 const tenants = loadTenants();
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
+
+// Test console — same page the serverless function serves, so the dashboard
+// works whether this runs as a long-lived server or on Vercel.
+app.get('/', (_req, res) => {
+  res.set('Content-Type', 'text/html; charset=utf-8').send(DASHBOARD_HTML);
+});
 
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', tenants: tenants.size, transport: 'streamable-http' });
