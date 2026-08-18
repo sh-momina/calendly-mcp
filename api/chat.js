@@ -52,6 +52,56 @@ async function readBody(req) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
+/**
+ * ElevenLabs substitutes {{system__time_utc}} and friends into the system prompt
+ * at call time. This console has to do the same, or the model reads the literal
+ * placeholder text, has no idea what day it is, and picks wrong dates.
+ */
+function fillTimeVariables(prompt, timezone) {
+  const now = new Date();
+  const tz = timezone || 'UTC';
+
+  const local = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZoneName: 'short'
+  }).format(now);
+
+  const values = {
+    system__time_utc: now.toISOString(),
+    system__time: local,
+    system__timezone: tz,
+    system__date: new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(now),
+    system__caller_id: 'test-console',
+    system__called_number: 'test-console',
+    system__conversation_id: 'test-console'
+  };
+
+  let filled = prompt ?? '';
+  let matched = false;
+  for (const [name, value] of Object.entries(values)) {
+    const pattern = new RegExp(`\\{\\{\\s*${name}\\s*\\}\\}`, 'g');
+    if (pattern.test(filled)) matched = true;
+    filled = filled.replace(pattern, value);
+  }
+
+  // Any remaining {{...}} would otherwise be read as literal text.
+  filled = filled.replace(/\{\{\s*[\w.]+\s*\}\}/g, '(not set in test console)');
+
+  // If the prompt never mentions the time, tell the model anyway — otherwise it
+  // guesses at "next Wednesday" and books the wrong day.
+  if (!matched) {
+    filled += `\n\nCurrent time: ${local} (${tz}). In UTC: ${now.toISOString()}.`;
+  }
+
+  return filled;
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Use POST.' });
 
@@ -81,7 +131,10 @@ export default async function handler(req, res) {
     const openaiTools = toOpenAITools(tools);
 
     const messages = [
-      { role: 'system', content: body.systemPrompt || 'You are a helpful scheduling assistant.' },
+      {
+        role: 'system',
+        content: fillTimeVariables(body.systemPrompt || 'You are a helpful scheduling assistant.', body.timezone)
+      },
       ...(body.messages ?? [])
     ];
 
