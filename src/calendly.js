@@ -22,6 +22,9 @@ export class CalendlyError extends Error {
   get hint() {
     switch (this.status) {
       case 400:
+        if (/location/i.test(this.message)) {
+          return 'The meeting location did not match what this event type allows. Call list_event_types to see the configured location, then pass location_kind (and location_detail if it needs a phone number or address).';
+        }
         return 'The request was rejected. Check that start_time is a real open slot in the future and in UTC (ending in Z).';
       case 401:
         return 'The Calendly token is invalid or expired. The account owner needs to generate a new personal access token.';
@@ -91,6 +94,12 @@ export class CalendlyClient {
       query: { user: me.uri, count: 100, active: activeOnly ? 'true' : undefined }
     });
     return collection;
+  }
+
+  /** Full detail for one event type — includes its configured locations. */
+  async getEventType(uri) {
+    const { resource } = await this.request('GET', uri);
+    return resource;
   }
 
   /**
