@@ -215,24 +215,6 @@ export function registerCalendlyTools(server, getToken) {
       const { location, error } = buildLocation(eventType, args);
       if (error) return fail(error);
 
-      // Calendly rejects a start_time that is not a live open slot with a
-      // generic "parameters are invalid". Check first so the agent gets a
-      // usable answer instead of that.
-      const windowStart = new Date(Math.max(Date.now() + 2 * 6e4, new Date(when.iso).getTime() - 6e4));
-      const windowEnd = new Date(new Date(when.iso).getTime() + 2 * 36e5);
-      const openSlots = await client.availableTimes(eventType.uri, windowStart.toISOString(), windowEnd.toISOString());
-      const target = new Date(when.iso).getTime();
-
-      if (!openSlots.some((s) => new Date(s.start_time).getTime() === target)) {
-        const nearby = openSlots.slice(0, 3).map((s) => `${speak(s.start_time, tz)} (start_time: ${s.start_time})`);
-        return fail(
-          `${speak(when.iso, tz)} is not an open slot, so nothing was booked. ` +
-            (nearby.length
-              ? `Openings around that time: ${nearby.join('; ')}. Offer one of these.`
-              : `There is nothing open within two hours of it. Check the date is right — ${speak(when.iso, tz)} is a ${new Date(when.iso).toLocaleDateString('en-US', { weekday: 'long', timeZone: tz })} — then call find_available_times for a wider window.`)
-        );
-      }
-
       const payload = {
         event_type: eventType.uri,
         start_time: when.iso,
@@ -242,7 +224,31 @@ export function registerCalendlyTools(server, getToken) {
       if (args.guests?.length) payload.event_guests = args.guests;
       if (args.notes) payload.questions_and_answers = [{ question: 'Notes', answer: args.notes, position: 1 }];
 
-      const invitee = await client.createInvitee(payload);
+      let invitee;
+      try {
+        invitee = await client.createInvitee(payload);
+      } catch (err) {
+        // Nothing was created, so it is safe to spend an extra call working out
+        // why — but only now, not on every successful booking.
+        if (err.status === 400) {
+          const nearby = await client
+            .availableTimes(
+              eventType.uri,
+              new Date(Math.max(Date.now() + 2 * 6e4, new Date(when.iso).getTime() - 6e4)).toISOString(),
+              new Date(new Date(when.iso).getTime() + 2 * 36e5).toISOString()
+            )
+            .catch(() => []);
+
+          const weekday = new Date(when.iso).toLocaleDateString('en-US', { weekday: 'long', timeZone: tz });
+          return fail(
+            `Calendly would not accept ${speak(when.iso, tz)}, so nothing was booked. ` +
+              (nearby.length
+                ? `Open slots near it: ${nearby.slice(0, 3).map((s) => `${speak(s.start_time, tz)} (start_time: ${s.start_time})`).join('; ')}. Offer one of these.`
+                : `Nothing is open within two hours of it — that date is a ${weekday}. Check the date is what the caller meant, then call find_available_times.`)
+          );
+        }
+        throw err;
+      }
 
       return ok(
         `Booked. ${args.invitee_name} is confirmed for ${speak(when.iso, tz)}. A confirmation email and calendar invite have been sent to ${args.invitee_email}.\n\nReschedule: ${invitee.reschedule_url}\nCancel: ${invitee.cancel_url}`,
