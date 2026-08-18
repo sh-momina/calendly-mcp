@@ -88,16 +88,36 @@ function startOfLocalDay(date, timezone, floor) {
 
 /** Validate a booking time: must parse, and must be in the future. */
 export function validateBookingTime(input) {
-  const when = new Date(input);
-  if (Number.isNaN(when.getTime())) {
-    return { ok: false, error: `"${input}" is not a valid date. Use ISO 8601 UTC, e.g. 2026-08-20T14:30:00Z.` };
+  if (input === undefined || input === null || input === '') {
+    return { ok: false, error: 'No time was given. Call find_available_times and pass one of its start_time values exactly.' };
   }
+
+  const raw = String(input).trim();
+  const when = new Date(raw);
+
+  if (Number.isNaN(when.getTime())) {
+    return {
+      ok: false,
+      error: `"${raw}" is not a valid date. Use the exact start_time string from find_available_times, e.g. 2026-08-20T14:30:00Z.`
+    };
+  }
+
+  // A bare local time ("2026-08-20T14:30:00") is ambiguous and silently shifts
+  // the booking by the server's offset. Insist on an explicit zone.
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(raw) && !/(Z|[+-]\d{2}:?\d{2})$/.test(raw)) {
+    return {
+      ok: false,
+      error: `"${raw}" has no timezone. Add Z for UTC, or copy the start_time from find_available_times unchanged.`
+    };
+  }
+
   if (when <= new Date()) {
     return {
       ok: false,
-      error: `${when.toISOString()} is in the past. Call find_available_times first and book one of the slots it returns verbatim.`
+      error: `${when.toISOString()} is in the past (now is ${new Date().toISOString()}). Call find_available_times and book one of the slots it returns verbatim.`
     };
   }
+
   return { ok: true, iso: when.toISOString() };
 }
 
