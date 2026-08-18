@@ -377,23 +377,8 @@ export function registerCalendlyTools(server, getToken) {
 
       const eventType = await client.getEventType(event.event_type);
 
-      // Confirm the new slot is genuinely open BEFORE touching the existing
-      // booking. Cancelling first and discovering the new time is unavailable
-      // leaves the caller with no meeting at all.
-      const windowStart = new Date(Math.max(Date.now() + 2 * 6e4, new Date(when.iso).getTime() - 6e4));
-      const windowEnd = new Date(new Date(when.iso).getTime() + 2 * 36e5);
-      const openSlots = await client.availableTimes(eventType.uri, windowStart.toISOString(), windowEnd.toISOString());
-      const target = new Date(when.iso).getTime();
-      const isOpen = openSlots.some((s) => new Date(s.start_time).getTime() === target);
-
-      if (!isOpen) {
-        const nearby = openSlots.slice(0, 3).map((s) => `${speak(s.start_time, tz)} (start_time: ${s.start_time})`);
-        return fail(
-          `${speak(when.iso, tz)} is not an open slot, so the existing meeting has been left untouched. ` +
-            (nearby.length
-              ? `Nearby openings: ${nearby.join('; ')}. Offer one of these and retry.`
-              : 'Call find_available_times for a wider window and offer the caller a slot from it.')
-        );
+      if (new Date(event.start_time).getTime() === new Date(when.iso).getTime()) {
+        return ok(`That meeting is already at ${speak(when.iso, tz)}. Nothing to change.`);
       }
 
       const { location } = buildLocation(eventType, {});
@@ -404,23 +389,44 @@ export function registerCalendlyTools(server, getToken) {
       };
       if (location) payload.location = location;
 
-      // Only now is it safe to release the old slot.
-      await client.cancelEvent(event_uuid, reason || 'Rescheduled');
-
+      // Book the replacement BEFORE releasing the original. If this fails the
+      // caller still has their existing meeting; the reverse order can leave
+      // them with nothing at all.
+      let booked;
       try {
-        const booked = await client.createInvitee(payload);
-        return ok(
-          `Rescheduled. ${invitee.name} is now booked for ${speak(when.iso, tz)} and has been emailed the update.\n\nReschedule: ${booked.reschedule_url}\nCancel: ${booked.cancel_url}`,
-          { event_uuid: uuidOf(booked.event), start_time: when.iso }
-        );
+        booked = await client.createInvitee(payload);
       } catch (err) {
-        // The old slot is gone and the new one did not take. Say so plainly
-        // rather than letting the agent claim success.
+        const nearby = await client
+          .availableTimes(
+            eventType.uri,
+            new Date(Math.max(Date.now() + 2 * 6e4, new Date(when.iso).getTime() - 6e4)).toISOString(),
+            new Date(new Date(when.iso).getTime() + 2 * 36e5).toISOString()
+          )
+          .catch(() => []);
+
         return fail(
-          `The original meeting was released but the new time could not be booked: ${err.message}. ` +
-            `Tell the caller their old slot is no longer held, then use create_scheduling_link and send them the link so they can pick a time themselves.`
+          `Could not book ${speak(when.iso, tz)}, so the existing meeting on ${speak(event.start_time, tz)} is untouched and still stands. Reason: ${err.message}` +
+            (nearby.length
+              ? ` Other openings: ${nearby.slice(0, 3).map((s) => `${speak(s.start_time, tz)} (start_time: ${s.start_time})`).join('; ')}.`
+              : '')
         );
       }
+
+      // The replacement exists. Releasing the old slot is now safe: the worst
+      // case is a duplicate booking, which is recoverable, rather than none.
+      try {
+        await client.cancelEvent(event_uuid, reason || 'Rescheduled');
+      } catch (err) {
+        return ok(
+          `Booked ${speak(when.iso, tz)} for ${invitee.name}, but the old meeting on ${speak(event.start_time, tz)} could not be cancelled (${err.message}). Both are currently on the calendar — call cancel_meeting with event_uuid ${event_uuid} to clear the old one.`,
+          { event_uuid: uuidOf(booked.event), start_time: when.iso, stale_event_uuid: event_uuid }
+        );
+      }
+
+      return ok(
+        `Rescheduled. ${invitee.name} is now booked for ${speak(when.iso, tz)} and has been emailed the update.\n\nReschedule: ${booked.reschedule_url}\nCancel: ${booked.cancel_url}`,
+        { event_uuid: uuidOf(booked.event), start_time: when.iso }
+      );
     })
   );
 
