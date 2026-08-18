@@ -353,26 +353,54 @@ export function registerCalendlyTools(server, getToken) {
         return fail('That meeting has no invitee on record, so it cannot be rebooked automatically. Cancel it and book a new meeting instead.');
       }
 
-      // Prefer Calendly's own reschedule link when the invitee should drive it.
+      if (event.status === 'canceled') {
+        return fail('That meeting is already cancelled. Use book_meeting to create a new one instead of rescheduling.');
+      }
+
+      const eventType = await client.getEventType(event.event_type);
+
+      // Confirm the new slot is genuinely open BEFORE touching the existing
+      // booking. Cancelling first and discovering the new time is unavailable
+      // leaves the caller with no meeting at all.
+      const windowStart = new Date(Math.max(Date.now() + 2 * 6e4, new Date(when.iso).getTime() - 6e4));
+      const windowEnd = new Date(new Date(when.iso).getTime() + 2 * 36e5);
+      const openSlots = await client.availableTimes(eventType.uri, windowStart.toISOString(), windowEnd.toISOString());
+      const target = new Date(when.iso).getTime();
+      const isOpen = openSlots.some((s) => new Date(s.start_time).getTime() === target);
+
+      if (!isOpen) {
+        const nearby = openSlots.slice(0, 3).map((s) => `${speak(s.start_time, tz)} (start_time: ${s.start_time})`);
+        return fail(
+          `${speak(when.iso, tz)} is not an open slot, so the existing meeting has been left untouched. ` +
+            (nearby.length
+              ? `Nearby openings: ${nearby.join('; ')}. Offer one of these and retry.`
+              : 'Call find_available_times for a wider window and offer the caller a slot from it.')
+        );
+      }
+
+      const { location } = buildLocation(eventType, {});
+      const payload = {
+        event_type: event.event_type,
+        start_time: when.iso,
+        invitee: { name: invitee.name, email: invitee.email, timezone: invitee.timezone || tz }
+      };
+      if (location) payload.location = location;
+
+      // Only now is it safe to release the old slot.
       await client.cancelEvent(event_uuid, reason || 'Rescheduled');
 
       try {
-        const eventType = await client.getEventType(event.event_type);
-        const { location } = buildLocation(eventType, {});
-        const payload = {
-          event_type: event.event_type,
-          start_time: when.iso,
-          invitee: { name: invitee.name, email: invitee.email, timezone: invitee.timezone || tz }
-        };
-        if (location) payload.location = location;
         const booked = await client.createInvitee(payload);
         return ok(
           `Rescheduled. ${invitee.name} is now booked for ${speak(when.iso, tz)} and has been emailed the update.\n\nReschedule: ${booked.reschedule_url}\nCancel: ${booked.cancel_url}`,
           { event_uuid: uuidOf(booked.event), start_time: when.iso }
         );
       } catch (err) {
+        // The old slot is gone and the new one did not take. Say so plainly
+        // rather than letting the agent claim success.
         return fail(
-          `The original meeting was cancelled but the new time could not be booked (${err.message}). Send the invitee this link so they can pick a new time themselves: ${event.event_type ? '' : ''}${invitee.reschedule_url || 'use create_scheduling_link'}`
+          `The original meeting was released but the new time could not be booked: ${err.message}. ` +
+            `Tell the caller their old slot is no longer held, then use create_scheduling_link and send them the link so they can pick a time themselves.`
         );
       }
     })
