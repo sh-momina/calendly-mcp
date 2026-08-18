@@ -39,6 +39,49 @@ async function resolveEventType(client, { event_type_uri, event_type_name }) {
  * Registers every Calendly tool on an McpServer instance.
  * `getToken` resolves the caller's Calendly token per request.
  */
+/**
+ * Calendly rejects a booking when the event type has a location configured and
+ * the request omits it: "Specified location kind is not configured for this
+ * event type." Agents have no way to know this, so we read the event type's own
+ * location settings and fill it in automatically.
+ */
+const NEEDS_INVITEE_INPUT = new Set(['ask_invitee', 'outbound_call', 'invitee_specified']);
+
+function buildLocation(eventType, { location_kind, location_detail }) {
+  const configured = eventType.locations ?? [];
+
+  // An explicit override from the caller always wins.
+  if (location_kind) {
+    const loc = { kind: location_kind };
+    if (location_detail) loc.location = location_detail;
+    return { location: loc };
+  }
+
+  if (!configured.length) return { location: undefined };
+
+  if (configured.length > 1) {
+    const kinds = configured.map((l) => l.kind).join(', ');
+    return {
+      error: `"${eventType.name}" offers several meeting locations (${kinds}). Ask the caller which they prefer, then retry with location_kind set to one of those.`
+    };
+  }
+
+  const only = configured[0];
+  if (NEEDS_INVITEE_INPUT.has(only.kind) && !location_detail) {
+    const asking =
+      only.kind === 'outbound_call'
+        ? 'a phone number to call them on'
+        : 'where the meeting should take place (a phone number or an address)';
+    return {
+      error: `"${eventType.name}" requires ${asking}. Ask the caller for it, then retry with location_detail set.`
+    };
+  }
+
+  const loc = { kind: only.kind };
+  if (location_detail) loc.location = location_detail;
+  return { location: loc };
+}
+
 export function registerCalendlyTools(server, getToken) {
   const withClient = (handler) => async (args) => {
     try {
@@ -83,9 +126,10 @@ export function registerCalendlyTools(server, getToken) {
       const types = await client.listEventTypes({ activeOnly: !include_inactive });
       if (!types.length) return ok('This Calendly account has no active meeting types.', []);
 
-      const lines = types.map(
-        (t) => `• ${t.name} — ${t.duration} min${t.active ? '' : ' (inactive)'}\n  uri: ${t.uri}`
-      );
+      const lines = types.map((t) => {
+        const locs = (t.locations ?? []).map((l) => l.kind).join(', ') || 'none configured';
+        return `• ${t.name} — ${t.duration} min${t.active ? '' : ' (inactive)'}\n  location: ${locs}\n  uri: ${t.uri}`;
+      });
       return ok(
         `${types.length} meeting type(s) available:\n${lines.join('\n')}`,
         types.map((t) => ({ name: t.name, duration: t.duration, uri: t.uri, active: t.active, scheduling_url: t.scheduling_url }))
@@ -163,17 +207,20 @@ export function registerCalendlyTools(server, getToken) {
 
       const me = await client.me();
       const tz = args.invitee_timezone || me.timezone || 'UTC';
-      const eventType = await resolveEventType(client, args);
+      let eventType = await resolveEventType(client, args);
+
+      // Ensure we have the full resource — location config lives there.
+      if (!eventType.locations) eventType = await client.getEventType(eventType.uri);
+
+      const { location, error } = buildLocation(eventType, args);
+      if (error) return fail(error);
 
       const payload = {
         event_type: eventType.uri,
         start_time: when.iso,
         invitee: { name: args.invitee_name, email: args.invitee_email, timezone: tz }
       };
-      if (args.location_kind) {
-        payload.location = { kind: args.location_kind };
-        if (args.location_detail) payload.location.location = args.location_detail;
-      }
+      if (location) payload.location = location;
       if (args.guests?.length) payload.event_guests = args.guests;
       if (args.notes) payload.questions_and_answers = [{ question: 'Notes', answer: args.notes, position: 1 }];
 
@@ -310,11 +357,15 @@ export function registerCalendlyTools(server, getToken) {
       await client.cancelEvent(event_uuid, reason || 'Rescheduled');
 
       try {
-        const booked = await client.createInvitee({
+        const eventType = await client.getEventType(event.event_type);
+        const { location } = buildLocation(eventType, {});
+        const payload = {
           event_type: event.event_type,
           start_time: when.iso,
           invitee: { name: invitee.name, email: invitee.email, timezone: invitee.timezone || tz }
-        });
+        };
+        if (location) payload.location = location;
+        const booked = await client.createInvitee(payload);
         return ok(
           `Rescheduled. ${invitee.name} is now booked for ${speak(when.iso, tz)} and has been emailed the update.\n\nReschedule: ${booked.reschedule_url}\nCancel: ${booked.cancel_url}`,
           { event_uuid: uuidOf(booked.event), start_time: when.iso }
