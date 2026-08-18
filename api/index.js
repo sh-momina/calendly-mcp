@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { registerCalendlyTools } from '../src/tools.js';
 import { loadTenants } from '../src/tenants.js';
+import { DASHBOARD_HTML } from '../src/dashboard.js';
 
 /**
  * Vercel serverless entrypoint.
@@ -57,6 +58,13 @@ function authenticate(req, url) {
 
 export default async function handler(req, res) {
   const url = new URL(req.url, `https://${req.headers.host}`);
+
+  // Test console. Served from the function itself so it works regardless of
+  // how static files are routed.
+  if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    return res.status(200).send ? res.status(200).send(DASHBOARD_HTML) : res.end(DASHBOARD_HTML);
+  }
 
   if (url.pathname === '/health' || url.pathname === '/api/health') {
     return res.status(200).json({
