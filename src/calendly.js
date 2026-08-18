@@ -5,6 +5,27 @@
 
 const BASE = 'https://api.calendly.com';
 
+/**
+ * Cross-request caches. Serverless instances are reused between invocations,
+ * so caching the account and its event types cuts several Calendly calls per
+ * tool call — which is what keeps a chatty agent under the rate limit.
+ */
+const userCache = new Map();
+const eventTypeCache = new Map();
+const USER_TTL = 5 * 6e4;
+const TYPES_TTL = 6e4;
+
+const cached = (store, key) => {
+  const hit = store.get(key);
+  return hit && hit.expires > Date.now() ? hit.value : undefined;
+};
+const remember = (store, key, value, ttl) => {
+  store.set(key, { value, expires: Date.now() + ttl });
+  return value;
+};
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 export class CalendlyError extends Error {
   constructor(status, body, endpoint) {
     const detail =
@@ -33,7 +54,7 @@ export class CalendlyError extends Error {
       case 404:
         return 'That event type or meeting no longer exists. Re-check availability and offer different times.';
       case 429:
-        return 'Rate limited by Calendly. Wait a few seconds and try again.';
+        return 'Calendly is rate limiting this account after too many calls in quick succession. Wait about ten seconds before retrying, and avoid re-checking availability you already have.';
       default:
         return 'Calendly had a temporary problem. Retry once, then fall back to sending a scheduling link.';
     }
@@ -47,7 +68,7 @@ export class CalendlyClient {
     this._me = null;
   }
 
-  async request(method, path, { query, body } = {}) {
+  async request(method, path, { query, body, attempt = 0 } = {}) {
     const url = new URL(path.startsWith('http') ? path : `${BASE}${path}`);
     if (query) {
       for (const [k, v] of Object.entries(query)) {
@@ -67,6 +88,16 @@ export class CalendlyClient {
       body: body ? JSON.stringify(body) : undefined
     });
 
+    // Calendly rate limits aggressively. Back off and retry rather than
+    // bubbling a 429 up to the agent, which would just make it try again
+    // immediately and dig the hole deeper.
+    if ((res.status === 429 || res.status >= 500) && attempt < 2) {
+      const retryAfter = Number(res.headers.get('retry-after'));
+      const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 700 * 2 ** attempt;
+      await sleep(Math.min(waitMs, 4000));
+      return this.request(method, path, { query, body, attempt: attempt + 1 });
+    }
+
     const text = await res.text();
     let parsed;
     try {
@@ -81,23 +112,38 @@ export class CalendlyClient {
 
   /** Cached current user — needed for nearly every other call. */
   async me() {
-    if (!this._me) {
-      const { resource } = await this.request('GET', '/users/me');
-      this._me = resource;
+    if (this._me) return this._me;
+    const hit = cached(userCache, this.token);
+    if (hit) {
+      this._me = hit;
+      return hit;
     }
-    return this._me;
+    const { resource } = await this.request('GET', '/users/me');
+    this._me = resource;
+    return remember(userCache, this.token, resource, USER_TTL);
   }
 
   async listEventTypes({ activeOnly = true } = {}) {
+    const key = `${this.token}:${activeOnly}`;
+    const hit = cached(eventTypeCache, key);
+    if (hit) return hit;
+
     const me = await this.me();
     const { collection } = await this.request('GET', '/event_types', {
       query: { user: me.uri, count: 100, active: activeOnly ? 'true' : undefined }
     });
-    return collection;
+    return remember(eventTypeCache, key, collection, TYPES_TTL);
   }
 
   /** Full detail for one event type — includes its configured locations. */
   async getEventType(uri) {
+    // The cached list already carries full resources; avoid a second round trip.
+    for (const [, entry] of eventTypeCache) {
+      if (entry.expires > Date.now()) {
+        const found = entry.value.find((t) => t.uri === uri);
+        if (found?.locations) return found;
+      }
+    }
     const { resource } = await this.request('GET', uri);
     return resource;
   }
