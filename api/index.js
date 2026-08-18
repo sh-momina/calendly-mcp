@@ -34,13 +34,24 @@ async function readBody(req) {
 
 function authenticate(req, url) {
   const header = req.headers.authorization || '';
-  const bearer = header.toLowerCase().startsWith('bearer ') ? header.slice(7).trim() : null;
-  const key = bearer || url.searchParams.get('api_key') || url.searchParams.get('user_id');
+  const bearer = header.toLowerCase().startsWith('bearer ') ? header.slice(7) : null;
+  let key = bearer || url.searchParams.get('api_key') || url.searchParams.get('user_id');
 
   if (!key) return { error: 'Missing credentials. Send "Authorization: Bearer <your api key>".' };
 
-  const tenant = tenants.get(String(key));
-  if (!tenant) return { error: 'Invalid API key.' };
+  key = String(key).trim();
+  // Some clients ask for the token only, others for the whole header value. If the
+  // user pasted "Bearer sk_..." into a token-only field, strip the extra prefix.
+  if (key.toLowerCase().startsWith('bearer ')) key = key.slice(7).trim();
+  // Strip quotes someone may have wrapped around the value.
+  key = key.replace(/^["']|["']$/g, '');
+
+  const tenant = tenants.get(key);
+  if (!tenant) {
+    return {
+      error: `Invalid API key. The server received a key of length ${key.length}. Compare that against the key length shown at /health — if they differ, one side has extra characters or whitespace.`
+    };
+  }
   return { tenant };
 }
 
@@ -48,7 +59,15 @@ export default async function handler(req, res) {
   const url = new URL(req.url, `https://${req.headers.host}`);
 
   if (url.pathname === '/health' || url.pathname === '/api/health') {
-    return res.status(200).json({ status: 'ok', tenants: tenants.size, transport: 'streamable-http', runtime: 'vercel' });
+    return res.status(200).json({
+      status: 'ok',
+      tenants: tenants.size,
+      transport: 'streamable-http',
+      runtime: 'vercel',
+      // Length only — never the key itself. Lets you spot a stray space or a
+      // half-pasted value without exposing the secret.
+      keyLengths: [...tenants.values()].map((t) => ({ label: t.label, keyLength: t.keyLength }))
+    });
   }
 
   if (req.method !== 'POST') {
