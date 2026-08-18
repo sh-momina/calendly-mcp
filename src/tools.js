@@ -39,6 +39,49 @@ async function resolveEventType(client, { event_type_uri, event_type_name }) {
  * Registers every Calendly tool on an McpServer instance.
  * `getToken` resolves the caller's Calendly token per request.
  */
+/**
+ * Calendly rejects a booking when the event type has a location configured and
+ * the request omits it: "Specified location kind is not configured for this
+ * event type." Agents have no way to know this, so we read the event type's own
+ * location settings and fill it in automatically.
+ */
+const NEEDS_INVITEE_INPUT = new Set(['ask_invitee', 'outbound_call', 'invitee_specified']);
+
+function buildLocation(eventType, { location_kind, location_detail }) {
+  const configured = eventType.locations ?? [];
+
+  // An explicit override from the caller always wins.
+  if (location_kind) {
+    const loc = { kind: location_kind };
+    if (location_detail) loc.location = location_detail;
+    return { location: loc };
+  }
+
+  if (!configured.length) return { location: undefined };
+
+  if (configured.length > 1) {
+    const kinds = configured.map((l) => l.kind).join(', ');
+    return {
+      error: `"${eventType.name}" offers several meeting locations (${kinds}). Ask the caller which they prefer, then retry with location_kind set to one of those.`
+    };
+  }
+
+  const only = configured[0];
+  if (NEEDS_INVITEE_INPUT.has(only.kind) && !location_detail) {
+    const asking =
+      only.kind === 'outbound_call'
+        ? 'a phone number to call them on'
+        : 'where the meeting should take place (a phone number or an address)';
+    return {
+      error: `"${eventType.name}" requires ${asking}. Ask the caller for it, then retry with location_detail set.`
+    };
+  }
+
+  const loc = { kind: only.kind };
+  if (location_detail) loc.location = location_detail;
+  return { location: loc };
+}
+
 export function registerCalendlyTools(server, getToken) {
   const withClient = (handler) => async (args) => {
     try {
@@ -83,9 +126,10 @@ export function registerCalendlyTools(server, getToken) {
       const types = await client.listEventTypes({ activeOnly: !include_inactive });
       if (!types.length) return ok('This Calendly account has no active meeting types.', []);
 
-      const lines = types.map(
-        (t) => `• ${t.name} — ${t.duration} min${t.active ? '' : ' (inactive)'}\n  uri: ${t.uri}`
-      );
+      const lines = types.map((t) => {
+        const locs = (t.locations ?? []).map((l) => l.kind).join(', ') || 'none configured';
+        return `• ${t.name} — ${t.duration} min${t.active ? '' : ' (inactive)'}\n  location: ${locs}\n  uri: ${t.uri}`;
+      });
       return ok(
         `${types.length} meeting type(s) available:\n${lines.join('\n')}`,
         types.map((t) => ({ name: t.name, duration: t.duration, uri: t.uri, active: t.active, scheduling_url: t.scheduling_url }))
@@ -163,21 +207,58 @@ export function registerCalendlyTools(server, getToken) {
 
       const me = await client.me();
       const tz = args.invitee_timezone || me.timezone || 'UTC';
-      const eventType = await resolveEventType(client, args);
+      let eventType = await resolveEventType(client, args);
+
+      // Ensure we have the full resource — location config lives there.
+      if (!eventType.locations) eventType = await client.getEventType(eventType.uri);
+
+      const { location, error } = buildLocation(eventType, args);
+      if (error) return fail(error);
 
       const payload = {
         event_type: eventType.uri,
         start_time: when.iso,
         invitee: { name: args.invitee_name, email: args.invitee_email, timezone: tz }
       };
-      if (args.location_kind) {
-        payload.location = { kind: args.location_kind };
-        if (args.location_detail) payload.location.location = args.location_detail;
-      }
+      if (location) payload.location = location;
       if (args.guests?.length) payload.event_guests = args.guests;
       if (args.notes) payload.questions_and_answers = [{ question: 'Notes', answer: args.notes, position: 1 }];
 
-      const invitee = await client.createInvitee(payload);
+      let invitee;
+      try {
+        invitee = await client.createInvitee(payload);
+      } catch (err) {
+        // Nothing was created, so it is safe to spend an extra call working out
+        // why — but only now, not on every successful booking.
+        // Calendly caps booking creation separately from the rest of the API.
+        // When that cap is hit, direct booking is unavailable for a while, but
+        // one-time scheduling links still work — so say that plainly.
+        if (err.status === 429) {
+          return fail(
+            `Calendly is not accepting direct bookings right now (rate limited on booking creation). Nothing was booked. ` +
+              `Use create_scheduling_link instead and send the caller the link so they can confirm ${speak(when.iso, tz)} themselves.`
+          );
+        }
+
+        if (err.status === 400) {
+          const nearby = await client
+            .availableTimes(
+              eventType.uri,
+              new Date(Math.max(Date.now() + 2 * 6e4, new Date(when.iso).getTime() - 6e4)).toISOString(),
+              new Date(new Date(when.iso).getTime() + 2 * 36e5).toISOString()
+            )
+            .catch(() => []);
+
+          const weekday = new Date(when.iso).toLocaleDateString('en-US', { weekday: 'long', timeZone: tz });
+          return fail(
+            `Calendly would not accept ${speak(when.iso, tz)}, so nothing was booked. ` +
+              (nearby.length
+                ? `Open slots near it: ${nearby.slice(0, 3).map((s) => `${speak(s.start_time, tz)} (start_time: ${s.start_time})`).join('; ')}. Offer one of these.`
+                : `Nothing is open within two hours of it — that date is a ${weekday}. Check the date is what the caller meant, then call find_available_times.`)
+          );
+        }
+        throw err;
+      }
 
       return ok(
         `Booked. ${args.invitee_name} is confirmed for ${speak(when.iso, tz)}. A confirmation email and calendar invite have been sent to ${args.invitee_email}.\n\nReschedule: ${invitee.reschedule_url}\nCancel: ${invitee.cancel_url}`,
@@ -306,24 +387,62 @@ export function registerCalendlyTools(server, getToken) {
         return fail('That meeting has no invitee on record, so it cannot be rebooked automatically. Cancel it and book a new meeting instead.');
       }
 
-      // Prefer Calendly's own reschedule link when the invitee should drive it.
-      await client.cancelEvent(event_uuid, reason || 'Rescheduled');
+      if (event.status === 'canceled') {
+        return fail('That meeting is already cancelled. Use book_meeting to create a new one instead of rescheduling.');
+      }
 
+      const eventType = await client.getEventType(event.event_type);
+
+      if (new Date(event.start_time).getTime() === new Date(when.iso).getTime()) {
+        return ok(`That meeting is already at ${speak(when.iso, tz)}. Nothing to change.`);
+      }
+
+      const { location } = buildLocation(eventType, {});
+      const payload = {
+        event_type: event.event_type,
+        start_time: when.iso,
+        invitee: { name: invitee.name, email: invitee.email, timezone: invitee.timezone || tz }
+      };
+      if (location) payload.location = location;
+
+      // Book the replacement BEFORE releasing the original. If this fails the
+      // caller still has their existing meeting; the reverse order can leave
+      // them with nothing at all.
+      let booked;
       try {
-        const booked = await client.createInvitee({
-          event_type: event.event_type,
-          start_time: when.iso,
-          invitee: { name: invitee.name, email: invitee.email, timezone: invitee.timezone || tz }
-        });
-        return ok(
-          `Rescheduled. ${invitee.name} is now booked for ${speak(when.iso, tz)} and has been emailed the update.\n\nReschedule: ${booked.reschedule_url}\nCancel: ${booked.cancel_url}`,
-          { event_uuid: uuidOf(booked.event), start_time: when.iso }
-        );
+        booked = await client.createInvitee(payload);
       } catch (err) {
+        const nearby = await client
+          .availableTimes(
+            eventType.uri,
+            new Date(Math.max(Date.now() + 2 * 6e4, new Date(when.iso).getTime() - 6e4)).toISOString(),
+            new Date(new Date(when.iso).getTime() + 2 * 36e5).toISOString()
+          )
+          .catch(() => []);
+
         return fail(
-          `The original meeting was cancelled but the new time could not be booked (${err.message}). Send the invitee this link so they can pick a new time themselves: ${event.event_type ? '' : ''}${invitee.reschedule_url || 'use create_scheduling_link'}`
+          `Could not book ${speak(when.iso, tz)}, so the existing meeting on ${speak(event.start_time, tz)} is untouched and still stands. Reason: ${err.message}` +
+            (nearby.length
+              ? ` Other openings: ${nearby.slice(0, 3).map((s) => `${speak(s.start_time, tz)} (start_time: ${s.start_time})`).join('; ')}.`
+              : '')
         );
       }
+
+      // The replacement exists. Releasing the old slot is now safe: the worst
+      // case is a duplicate booking, which is recoverable, rather than none.
+      try {
+        await client.cancelEvent(event_uuid, reason || 'Rescheduled');
+      } catch (err) {
+        return ok(
+          `Booked ${speak(when.iso, tz)} for ${invitee.name}, but the old meeting on ${speak(event.start_time, tz)} could not be cancelled (${err.message}). Both are currently on the calendar — call cancel_meeting with event_uuid ${event_uuid} to clear the old one.`,
+          { event_uuid: uuidOf(booked.event), start_time: when.iso, stale_event_uuid: event_uuid }
+        );
+      }
+
+      return ok(
+        `Rescheduled. ${invitee.name} is now booked for ${speak(when.iso, tz)} and has been emailed the update.\n\nReschedule: ${booked.reschedule_url}\nCancel: ${booked.cancel_url}`,
+        { event_uuid: uuidOf(booked.event), start_time: when.iso }
+      );
     })
   );
 
