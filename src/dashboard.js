@@ -1,0 +1,340 @@
+/**
+ * The test console, served directly by the function so it does not depend on
+ * static hosting rules or file placement.
+ */
+export const DASHBOARD_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scheduling agent · test bench</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#0F151C; --panel:#16202B; --raise:#1D2A38; --line:#26364a;
+    --paper:#E6EAEF; --muted:#7D8FA1;
+    --signal:#E0A340; --go:#56B39A; --stop:#D9634F;
+    --display:'Space Grotesk',system-ui,sans-serif;
+    --body:'Inter',system-ui,sans-serif;
+    --mono:'IBM Plex Mono',ui-monospace,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--ink);color:var(--paper);font-family:var(--body);font-size:14px;line-height:1.5}
+  h1,h2,h3,.lbl{font-family:var(--display)}
+  button,input,textarea,select{font-family:inherit;font-size:inherit;color:inherit}
+
+  /* ---------- top bar ---------- */
+  header{display:flex;align-items:center;gap:16px;flex-wrap:wrap;
+    padding:14px 20px;border-bottom:1px solid var(--line);background:var(--panel)}
+  .mark{font-family:var(--display);font-weight:700;letter-spacing:-.02em;font-size:16px}
+  .mark span{color:var(--signal)}
+  .endpoint{display:flex;align-items:center;gap:8px;margin-left:auto;
+    background:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 8px 6px 12px}
+  .endpoint code{font-family:var(--mono);font-size:12px;color:var(--muted);
+    max-width:46vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--muted);flex:none}
+  .dot.on{background:var(--go);box-shadow:0 0 0 3px rgba(86,179,154,.18)}
+  .dot.off{background:var(--stop)}
+
+  /* ---------- layout ---------- */
+  main{display:grid;grid-template-columns:300px minmax(0,1fr) 320px;
+    height:calc(100vh - 57px)}
+  .col{min-height:0;display:flex;flex-direction:column;overflow-y:auto}
+  .col+.col{border-left:1px solid var(--line)}
+  .pad{padding:16px}
+  .lbl{display:block;font-size:11px;letter-spacing:.09em;text-transform:uppercase;
+    color:var(--muted);margin:0 0 6px}
+  .field{width:100%;background:var(--ink);border:1px solid var(--line);border-radius:6px;
+    padding:9px 10px;font-family:var(--mono);font-size:12px;outline:none}
+  .field:focus{border-color:var(--signal)}
+  textarea.field{font-family:var(--body);font-size:13px;resize:vertical;min-height:110px;line-height:1.55}
+  .group{margin-bottom:18px}
+  .hint{font-size:11px;color:var(--muted);margin-top:6px;line-height:1.45}
+
+  button{background:var(--raise);border:1px solid var(--line);border-radius:6px;
+    padding:8px 12px;cursor:pointer;transition:border-color .15s,background .15s}
+  button:hover:not(:disabled){border-color:var(--signal)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  button:focus-visible,.field:focus-visible{outline:2px solid var(--signal);outline-offset:2px}
+  .primary{background:var(--signal);color:#241a08;border-color:var(--signal);font-weight:500}
+  .ghost{background:none;font-size:12px;padding:5px 9px}
+
+  /* ---------- chat ---------- */
+  .stream{flex:1;padding:20px;display:flex;flex-direction:column;gap:14px}
+  .msg{max-width:78%;padding:11px 14px;border-radius:12px;white-space:pre-wrap;word-wrap:break-word}
+  .me{align-self:flex-end;background:var(--raise);border:1px solid var(--line);border-bottom-right-radius:3px}
+  .bot{align-self:flex-start;background:var(--panel);border:1px solid var(--line);border-bottom-left-radius:3px}
+  .sys{align-self:center;font-size:12px;color:var(--stop);text-align:center;max-width:90%}
+  .empty{margin:auto;text-align:center;color:var(--muted);max-width:340px}
+  .empty h2{font-size:15px;color:var(--paper);margin:0 0 6px}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin-top:14px}
+  .chip{font-size:12px;border-radius:20px;padding:6px 12px}
+  .composer{display:flex;gap:8px;padding:14px 20px;border-top:1px solid var(--line);background:var(--panel)}
+  .composer input{flex:1}
+
+  /* ---------- trace: the signature element ---------- */
+  .stub{position:relative;margin:0 0 8px 10px;background:var(--panel);
+    border:1px solid var(--line);border-left:none;border-radius:0 6px 6px 0;padding:10px 12px}
+  .stub::before{content:'';position:absolute;left:-10px;top:0;bottom:0;width:10px;
+    background:repeating-linear-gradient(to bottom,var(--signal) 0 3px,transparent 3px 7px);
+    border-radius:6px 0 0 6px;opacity:.55}
+  .stub.bad::before{background:repeating-linear-gradient(to bottom,var(--stop) 0 3px,transparent 3px 7px)}
+  .stub summary{display:flex;align-items:baseline;gap:8px;cursor:pointer;list-style:none}
+  .stub summary::-webkit-details-marker{display:none}
+  .tname{font-family:var(--mono);font-size:12px;color:var(--signal);flex:1;word-break:break-all}
+  .stub.bad .tname{color:var(--stop)}
+  .ms{font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .stub pre{font-family:var(--mono);font-size:11px;line-height:1.5;background:var(--ink);
+    border:1px solid var(--line);border-radius:4px;padding:8px;margin:8px 0 0;
+    overflow-x:auto;white-space:pre-wrap;word-break:break-word;max-height:220px;overflow-y:auto}
+  .toolist{display:flex;flex-wrap:wrap;gap:5px}
+  .tool{font-family:var(--mono);font-size:11px;background:var(--raise);
+    border:1px solid var(--line);border-radius:4px;padding:4px 7px;color:var(--muted)}
+
+  @media(max-width:900px){
+    main{grid-template-columns:1fr;height:auto}
+    .col+.col{border-left:none;border-top:1px solid var(--line)}
+    .endpoint code{max-width:60vw}
+  }
+  @media(prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="mark">calendly<span>·</span>mcp</div>
+  <div class="endpoint">
+    <span class="dot" id="dot"></span>
+    <code id="ep">loading…</code>
+    <button class="ghost" id="copyEp">Copy</button>
+  </div>
+</header>
+
+<main>
+  <!-- ---------- setup ---------- -->
+  <section class="col pad">
+    <div class="group">
+      <label class="lbl" for="key">Server API key</label>
+      <input class="field" id="key" type="password" placeholder="sk_live_…" autocomplete="off">
+      <div class="hint">The <code>MCP_API_KEY</code> you set in Vercel. Stored in this browser only.</div>
+    </div>
+
+    <div class="group">
+      <label class="lbl" for="oai">OpenAI API key</label>
+      <input class="field" id="oai" type="password" placeholder="sk-…" autocomplete="off">
+      <div class="hint">Drives the test chat. Not needed to run a tool directly.</div>
+    </div>
+
+    <div class="group">
+      <label class="lbl" for="model">Model</label>
+      <input class="field" id="model" value="gpt-4o-mini">
+    </div>
+
+    <div class="group">
+      <label class="lbl" for="prompt">System prompt</label>
+      <textarea class="field" id="prompt">You are the assistant for a small business. You answer questions and book appointments.
+
+Always check availability before offering a time. Offer two or three options, never a list of ten. Confirm the caller's name and email before booking. Speak in the caller's timezone.</textarea>
+      <div class="hint">This is what you'll paste into ElevenLabs once it behaves the way you want.</div>
+    </div>
+
+    <div class="group">
+      <span class="lbl">Run one tool directly</span>
+      <select class="field" id="toolPick" style="margin-bottom:6px"><option>connect first…</option></select>
+      <textarea class="field" id="toolArgs" style="min-height:64px;font-family:var(--mono);font-size:11px">{}</textarea>
+      <button style="width:100%;margin-top:6px" id="runTool">Run tool</button>
+      <div class="hint">Tests the server without the model in the way.</div>
+    </div>
+
+    <div class="group">
+      <span class="lbl">Tools exposed</span>
+      <div class="toolist" id="toolist"><span class="hint">Enter your key to connect.</span></div>
+    </div>
+  </section>
+
+  <!-- ---------- console ---------- -->
+  <section class="col">
+    <div class="stream" id="stream">
+      <div class="empty" id="empty">
+        <h2>Test bench</h2>
+        <p>Enter your server key, then talk to the agent exactly as a customer would.</p>
+        <div class="chips">
+          <button class="chip" data-say="What meeting types do I have?">What meeting types do I have?</button>
+          <button class="chip" data-say="What's free tomorrow?">What's free tomorrow?</button>
+          <button class="chip" data-say="Book me in tomorrow afternoon, I'm Sam, sam@example.com">Book a meeting</button>
+        </div>
+      </div>
+    </div>
+    <div class="composer">
+      <input class="field" id="say" placeholder="Type as if you were the customer…" autocomplete="off">
+      <button class="primary" id="send">Send</button>
+      <button class="ghost" id="reset" title="Clear conversation">Reset</button>
+    </div>
+  </section>
+
+  <!-- ---------- trace ---------- -->
+  <section class="col pad">
+    <span class="lbl">Tool trace</span>
+    <div id="trace"><div class="hint">Every tool call the agent makes shows up here, in order, with timings.</div></div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const origin = location.origin;
+let history = [];
+let tools = [];
+
+$('ep').textContent = origin + '/mcp';
+$('copyEp').onclick = () => {
+  navigator.clipboard.writeText(origin + '/mcp');
+  $('copyEp').textContent = 'Copied';
+  setTimeout(() => ($('copyEp').textContent = 'Copy'), 1400);
+};
+
+// --- remember settings locally so a refresh doesn't lose your setup ---
+for (const id of ['key','oai','model','prompt']) {
+  const saved = localStorage.getItem('cm_' + id);
+  if (saved !== null) $(id).value = saved;
+  $(id).addEventListener('input', () => localStorage.setItem('cm_' + id, $(id).value));
+}
+
+async function rpc(method, params = {}) {
+  const res = await fetch(origin + '/mcp', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer ' + $('key').value.trim(),
+      'Content-Type': 'application/json',
+      'Accept': 'application/json, text/event-stream'
+    },
+    body: JSON.stringify({ jsonrpc: '2.0', id: Date.now(), method, params })
+  });
+  const json = await res.json();
+  if (json.error) throw new Error(json.error.message);
+  return json.result;
+}
+
+async function connect() {
+  if (!$('key').value.trim()) { setDot(null); return; }
+  try {
+    const { tools: list } = await rpc('tools/list');
+    tools = list;
+    setDot(true);
+    $('toolist').innerHTML = list.map(t => \`<span class="tool">\${t.name}</span>\`).join('');
+    $('toolPick').innerHTML = list.map(t => \`<option>\${t.name}</option>\`).join('');
+  } catch (err) {
+    setDot(false);
+    $('toolist').innerHTML = \`<span class="hint" style="color:var(--stop)">\${err.message}</span>\`;
+  }
+}
+
+function setDot(state) {
+  $('dot').className = 'dot' + (state === true ? ' on' : state === false ? ' off' : '');
+}
+
+let debounce;
+$('key').addEventListener('input', () => { clearTimeout(debounce); debounce = setTimeout(connect, 500); });
+connect();
+
+// --- transcript ---
+function bubble(text, cls) {
+  $('empty')?.remove();
+  const el = document.createElement('div');
+  el.className = 'msg ' + cls;
+  el.textContent = text;
+  $('stream').appendChild(el);
+  $('stream').scrollTop = $('stream').scrollHeight;
+  return el;
+}
+
+function stub(entry) {
+  const el = document.createElement('details');
+  el.className = 'stub' + (entry.failed ? ' bad' : '');
+  el.innerHTML = \`<summary><span class="tname">\${entry.tool}</span><span class="ms">\${entry.ms}ms</span></summary>
+    <pre>\${escapeHtml(JSON.stringify(entry.args, null, 2))}</pre>
+    <pre>\${escapeHtml(entry.output)}</pre>\`;
+  if ($('trace').firstChild?.className === 'hint') $('trace').innerHTML = '';
+  $('trace').prepend(el);
+}
+
+const escapeHtml = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+
+async function send(text) {
+  if (!text.trim()) return;
+  if (!$('key').value.trim()) return bubble('Add your server API key on the left first.', 'sys');
+
+  bubble(text, 'me');
+  history.push({ role: 'user', content: text });
+  $('say').value = '';
+  $('send').disabled = true;
+
+  const thinking = bubble('…', 'bot');
+
+  try {
+    const res = await fetch(origin + '/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apiKey: $('key').value.trim(),
+        openaiKey: $('oai').value.trim(),
+        model: $('model').value.trim(),
+        systemPrompt: $('prompt').value,
+        messages: history
+      })
+    });
+    const data = await res.json();
+    (data.trace ?? []).forEach(stub);
+
+    if (data.error) {
+      thinking.remove();
+      bubble(data.error, 'sys');
+    } else {
+      thinking.textContent = data.reply || '(empty reply)';
+      thinking.className = 'msg bot';
+      history.push({ role: 'assistant', content: data.reply });
+    }
+  } catch (err) {
+    thinking.remove();
+    bubble(err.message, 'sys');
+  } finally {
+    $('send').disabled = false;
+    $('say').focus();
+  }
+}
+
+$('send').onclick = () => send($('say').value);
+$('say').addEventListener('keydown', (e) => { if (e.key === 'Enter') send($('say').value); });
+document.addEventListener('click', (e) => { if (e.target.dataset.say) send(e.target.dataset.say); });
+$('reset').onclick = () => {
+  history = [];
+  $('stream').innerHTML = '';
+  $('trace').innerHTML = '<div class="hint">Trace cleared.</div>';
+};
+
+// --- direct tool run ---
+$('runTool').onclick = async () => {
+  const name = $('toolPick').value;
+  let args;
+  try {
+    args = JSON.parse($('toolArgs').value || '{}');
+  } catch {
+    return stub({ tool: name, args: {}, output: 'Arguments must be valid JSON.', failed: true, ms: 0 });
+  }
+  const t0 = Date.now();
+  $('runTool').disabled = true;
+  try {
+    const result = await rpc('tools/call', { name, arguments: args });
+    const out = (result.content ?? []).filter(c => c.type === 'text').map(c => c.text).join('\\n');
+    stub({ tool: name, args, output: out || '(no output)', failed: Boolean(result.isError), ms: Date.now() - t0 });
+  } catch (err) {
+    stub({ tool: name, args, output: err.message, failed: true, ms: Date.now() - t0 });
+  } finally {
+    $('runTool').disabled = false;
+  }
+};
+</script>
+</body>
+</html>
+`;
