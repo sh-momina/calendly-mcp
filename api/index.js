@@ -3,6 +3,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { registerCalendlyTools } from '../src/tools.js';
 import { loadTenants } from '../src/tenants.js';
 import { DASHBOARD_HTML } from '../src/dashboard.js';
+import { registerSheetsTool } from '../src/sheets.js';
 
 /**
  * Vercel serverless entrypoint.
@@ -99,6 +100,7 @@ export default async function handler(req, res) {
   );
 
   registerCalendlyTools(server, () => tenant.calendlyToken);
+  registerSheetsTool(server, () => tenant);
 
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
