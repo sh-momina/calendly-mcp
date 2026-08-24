@@ -56,6 +56,22 @@ async function sheetsFetch(path, accessToken, options = {}) {
   return res.json();
 }
 
+// Finds the row for THIS specific meeting — matched by email AND the
+// meeting's current time in the sheet — not just "any row for this email".
+// Needed because one contact can have several separate bookings/rows.
+async function findRowByEmailAndTime(sheetId, email, time, accessToken) {
+  const data = await sheetsFetch(`/${sheetId}/values/A:F`, accessToken);
+  const rows = data.values || [];
+  const targetEmail = email.trim().toLowerCase();
+  const targetTime = time.trim();
+  for (let i = 1; i < rows.length; i++) { // skip header row
+    const rowEmail = (rows[i][2] || '').trim().toLowerCase();
+    const rowTime = (rows[i][4] || '').trim();
+    if (rowEmail === targetEmail && rowTime === targetTime) return i + 1; // 1-indexed
+  }
+  return null;
+}
+
 async function getGridId(sheetId, accessToken) {
   const meta = await sheetsFetch(`/${sheetId}?fields=sheets.properties`, accessToken);
   return meta.sheets[0].properties.sheetId;
@@ -84,9 +100,9 @@ async function colorRow(sheetId, rowNumber, color, accessToken) {
 }
 
 /**
- * Always appends a new row — one row per event (booked / rescheduled /
- * cancelled), even for the same contact. Nothing existing is ever
- * modified or removed.
+ * New bookings always get a fresh row. Reschedules and cancellations
+ * update the SAME row for that specific meeting (found via email +
+ * previous_time), leaving every other row completely untouched.
  */
 export function registerSheetsTool(server, getTenant) {
   server.registerTool(
@@ -94,7 +110,7 @@ export function registerSheetsTool(server, getTenant) {
     {
       title: 'Log meeting status to Google Sheets',
       description:
-        'Adds a new row to the connected Google Sheet recording this contact and their meeting status. Call this every time a meeting is booked, rescheduled, or cancelled, right after the corresponding Calendly action succeeds. Always adds a fresh row — never modifies or removes any existing row, even for a repeat contact.',
+        'For a new booking, adds a fresh row to the connected Google Sheet. For a reschedule or cancellation, updates the existing row for that specific meeting in place (found via email and previous_time) — every other row, including other meetings for the same contact, is left untouched. Call this right after the corresponding Calendly action succeeds.',
       inputSchema: {
         name: z.string().describe('Full name of the contact.'),
         phone: z.string().optional().describe('Use "N/A" if not provided.'),
@@ -102,12 +118,12 @@ export function registerSheetsTool(server, getTenant) {
         status: z
           .enum(['Meeting Booked', 'Meeting Rescheduled', 'Meeting Cancelled'])
           .describe('The status of this specific event.'),
-        time: z.string().describe('ISO 8601 timestamp of the meeting (the new time for a reschedule, or the meeting time for a booking/cancellation).'),
+        time: z.string().describe('ISO 8601 timestamp of the meeting (the new time for a reschedule; the meeting time being cancelled for a cancellation; the booked time for a new booking).'),
         previous_time: z
           .string()
           .optional()
           .describe(
-            'For a reschedule or cancellation, the ORIGINAL start_time of the specific meeting being changed (from list_meetings/get_meeting). Required whenever the contact could have more than one meeting on record, so the log shows exactly which booking this refers to.'
+            'REQUIRED for Meeting Rescheduled and Meeting Cancelled: the ORIGINAL start_time of the specific meeting being changed (from list_meetings/get_meeting), exactly as it was passed when that meeting was first booked. Used to find and update the correct row. Omit only for a new Meeting Booked.'
           )
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
@@ -120,21 +136,49 @@ export function registerSheetsTool(server, getTenant) {
         }
 
         const accessToken = await getAccessToken(tenant);
-        let changeNote = status === 'Meeting Booked' ? '' : status.replace('Meeting ', '');
-        if (previous_time) changeNote += ` (was ${previous_time})`;
-        const rowValues = [name, phone || 'N/A', email, status, time, changeNote];
 
+        if (status === 'Meeting Booked') {
+          const rowValues = [name, phone || 'N/A', email, status, time, ''];
+          const appendRes = await sheetsFetch(
+            `/${tenant.sheetId}/values/A:F:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
+            accessToken,
+            { method: 'POST', body: JSON.stringify({ values: [rowValues] }) }
+          );
+          const rowNumber = parseInt(appendRes.updates.updatedRange.match(/(\d+):/)[1], 10);
+          await colorRow(tenant.sheetId, rowNumber, STATUS_COLORS[status], accessToken);
+          return ok(`Logged new booking for ${name} (${email}).`, { row: rowNumber, status });
+        }
+
+        // Rescheduled or Cancelled: update the matching row in place.
+        if (!previous_time) {
+          return fail('previous_time is required for a reschedule or cancellation, so the correct row can be found.');
+        }
+
+        const existingRow = await findRowByEmailAndTime(tenant.sheetId, email, previous_time, accessToken);
+        const changeNote = `${status.replace('Meeting ', '')} (was ${previous_time})`;
+
+        if (existingRow) {
+          const rowValues = [name, phone || 'N/A', email, status, time, changeNote];
+          await sheetsFetch(
+            `/${tenant.sheetId}/values/A${existingRow}:F${existingRow}?valueInputOption=USER_ENTERED`,
+            accessToken,
+            { method: 'PUT', body: JSON.stringify({ values: [rowValues] }) }
+          );
+          await colorRow(tenant.sheetId, existingRow, STATUS_COLORS[status], accessToken);
+          return ok(`Updated the existing row for ${name} (${email}).`, { row: existingRow, status });
+        }
+
+        // No matching original row found (e.g. it predates this sheet, or
+        // was booked before logging existed) — append instead of losing the event.
+        const rowValues = [name, phone || 'N/A', email, status, time, `${changeNote} — original row not found, added as new`];
         const appendRes = await sheetsFetch(
           `/${tenant.sheetId}/values/A:F:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
           accessToken,
           { method: 'POST', body: JSON.stringify({ values: [rowValues] }) }
         );
         const rowNumber = parseInt(appendRes.updates.updatedRange.match(/(\d+):/)[1], 10);
-
-        const color = STATUS_COLORS[status] || STATUS_COLORS['Meeting Booked'];
-        await colorRow(tenant.sheetId, rowNumber, color, accessToken);
-
-        return ok(`Logged "${status}" for ${name} (${email}) as a new row.`, { row: rowNumber, status });
+        await colorRow(tenant.sheetId, rowNumber, STATUS_COLORS[status], accessToken);
+        return ok(`No existing row found for that meeting — added as a new row instead.`, { row: rowNumber, status });
       } catch (err) {
         return fail(err.message);
       }
