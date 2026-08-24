@@ -4,6 +4,7 @@ import { registerCalendlyTools } from '../src/tools.js';
 import { loadTenants } from '../src/tenants.js';
 import { DASHBOARD_HTML } from '../src/dashboard.js';
 import { registerSheetsTool } from '../src/sheets.js';
+import { registerSlackTool } from '../src/slack.js';
 
 /**
  * Vercel serverless entrypoint.
@@ -101,6 +102,7 @@ export default async function handler(req, res) {
 
   registerCalendlyTools(server, () => tenant.calendlyToken);
   registerSheetsTool(server, () => tenant);
+  registerSlackTool(server, () => tenant);
 
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
