@@ -338,19 +338,81 @@ Edit the full value, add a comma, and append their object before the closing `]`
 - [ ] Go to the server's Tools list on this agent → set approval mode to **Fine-Grained Tool Approval**
 - [ ] For each tool, choose **Disable**, **Auto-approve**, or **Requires approval** based on what this client should have access to (e.g. disable `cancel_meeting` if they don't want voice cancellations; disable `log_meeting_status` entirely if they skipped Sheets in step 2C)
 
+### 5. Update their system prompt
+- [ ] Add booking-confirmation instruction (spell back name/email before booking)
+- [ ] Add the log_meeting_status logging instructions, using the exact three status values: `"Meeting Booked"`, `"Meeting Rescheduled"`, `"Meeting Cancelled"` — nothing else
+- [ ] Make sure nothing in the prompt references old status values from the retired Zapier setup ("new lead", "not interested", etc.)
+- [ ] Make sure the prompt doesn't name or gate on a specific meeting type/duration unless this client's Calendly account genuinely has more than one event type
+
+### 6. Test before handing off
+- [ ] Test a booking through the live agent
+- [ ] Test a reschedule
+- [ ] Test a cancellation
+- [ ] Confirm all three show up correctly in their Google Sheet, in the right color (white/yellow/red) — skip if they opted out of Sheets
+
 ## Adding a new column to the sheet
 
-If it's a column you'll fill in by hand (e.g. "Notes"): just add the header
-in the sheet. No code changes — the tool only touches columns A–F.
+First decide which kind of column this is — the two cases need different work.
 
-If the agent should fill it in automatically, code changes are needed in
-`src/sheets.js`:
-- [ ] Add the new field to the `inputSchema` (e.g. `notes: z.string().optional()`)
-- [ ] Add it to the destructured handler args and to `rowValues`
-- [ ] Change every `A:F` range (in `findRowByEmail`, the update, and the append) to `A:G` (or one letter further, depending on the new column's position)
-- [ ] Change `colorRow`'s `endColumnIndex: 6` to `7` (so the status color still covers the full row)
-- [ ] Add the new header to your actual sheet
-- [ ] Mention the new field in the system prompt so the agent knows to fill it in
+### Case A — a column you'll fill in by hand (e.g. "Notes you write yourself")
+- [ ] Just add the header in the sheet, in any empty column (G, H, etc.)
+- [ ] Nothing else to do. The tool only ever reads/writes columns A–F, so anything you add after that is safe and untouched by the automation.
+
+### Case B — a column the agent should fill in automatically (e.g. "Notes from the call", "Meeting Type", "Source")
+This needs code changes in `src/sheets.js`, since the column range is currently hardcoded to `A:F`. Example below uses a new column called **Notes** going into column **G** — swap in your actual field name and letter.
+
+- [ ] **Add the header to your sheet.** Open the sheet, type the new column name (e.g. `Notes`) into cell G1.
+
+- [ ] **Add the field to the tool's schema**, so the agent is allowed to send it. In `src/sheets.js`, find the `inputSchema` block inside `registerSheetsTool` and add one line:
+  ```js
+  inputSchema: {
+    name: z.string().describe('Full name of the contact.'),
+    phone: z.string().optional().describe('Use "N/A" if not provided.'),
+    email: z.string().email().describe('Email address of the contact.'),
+    status: z.enum(['Meeting Booked', 'Meeting Rescheduled', 'Meeting Cancelled']).describe('...'),
+    time: z.string().describe('ISO 8601 timestamp of the meeting.'),
+    notes: z.string().optional().describe('Any extra context about this contact.')   // <-- new
+  },
+  ```
+
+- [ ] **Add the field to the handler function**, so it's actually read from the agent's call. Find this line:
+  ```js
+  async ({ name, phone, email, status, time }) => {
+  ```
+  Change it to:
+  ```js
+  async ({ name, phone, email, status, time, notes }) => {
+  ```
+
+- [ ] **Add the value to the row that gets written.** Find:
+  ```js
+  const rowValues = [name, phone || 'N/A', email, status, time, changeNote];
+  ```
+  Change it to:
+  ```js
+  const rowValues = [name, phone || 'N/A', email, status, time, changeNote, notes || ''];
+  ```
+
+- [ ] **Widen every column range from `A:F` to `A:G`.** There are three places this appears in `sheets.js` — search the file for `A:F` and update each:
+  1. Inside `findRowByEmail`: `` `/${sheetId}/values/A:F` `` → `` `/${sheetId}/values/A:G` ``
+  2. Inside the update (PUT) call: `` `/${tenant.sheetId}/values/A${existingRow}:F${existingRow}?...` `` → change `F${existingRow}` to `G${existingRow}`
+  3. Inside the append call: `` `/${tenant.sheetId}/values/A:F:append?...` `` → `` `/${tenant.sheetId}/values/A:G:append?...` ``
+
+- [ ] **Widen the color highlight range.** Find in `colorRow`:
+  ```js
+  endColumnIndex: 6
+  ```
+  Change to:
+  ```js
+  endColumnIndex: 7
+  ```
+  (This is a count, not a letter — column A is index 0, so F is index 5 and the range end is exclusive at 6. Adding column G means the end becomes 7. If you add a second new column after that, this becomes 8, and so on.)
+
+- [ ] **Tell the agent about the new field in its system prompt** — e.g. add a line like: "Pass any relevant context about the caller's business or need in the `notes` field when calling log_meeting_status."
+
+- [ ] **Commit, push, let Vercel redeploy, then test** — book a test meeting through the agent and confirm the new column fills in correctly in the sheet.
+
+Note: if the new column isn't the very next one after "Changes" (F), adjust the letters/numbers above accordingly — e.g. a second new column goes in H, ranges become `A:H`, and `endColumnIndex` becomes `8`.
 
 ## Project layout
 
