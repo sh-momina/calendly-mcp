@@ -338,6 +338,20 @@ Edit the full value, add a comma, and append their object before the closing `]`
 - [ ] Go to the server's Tools list on this agent → set approval mode to **Fine-Grained Tool Approval**
 - [ ] For each tool, choose **Disable**, **Auto-approve**, or **Requires approval** based on what this client should have access to (e.g. disable `cancel_meeting` if they don't want voice cancellations; disable `log_meeting_status` entirely if they skipped Sheets in step 2C)
 
+## Adding a new column to the sheet
+
+If it's a column you'll fill in by hand (e.g. "Notes"): just add the header
+in the sheet. No code changes — the tool only touches columns A–F.
+
+If the agent should fill it in automatically, code changes are needed in
+`src/sheets.js`:
+- [ ] Add the new field to the `inputSchema` (e.g. `notes: z.string().optional()`)
+- [ ] Add it to the destructured handler args and to `rowValues`
+- [ ] Change every `A:F` range (in `findRowByEmail`, the update, and the append) to `A:G` (or one letter further, depending on the new column's position)
+- [ ] Change `colorRow`'s `endColumnIndex: 6` to `7` (so the status color still covers the full row)
+- [ ] Add the new header to your actual sheet
+- [ ] Mention the new field in the system prompt so the agent knows to fill it in
+
 ## Project layout
 
 ```
