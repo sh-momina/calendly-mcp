@@ -338,18 +338,6 @@ Edit the full value, add a comma, and append their object before the closing `]`
 - [ ] Go to the server's Tools list on this agent → set approval mode to **Fine-Grained Tool Approval**
 - [ ] For each tool, choose **Disable**, **Auto-approve**, or **Requires approval** based on what this client should have access to (e.g. disable `cancel_meeting` if they don't want voice cancellations; disable `log_meeting_status` entirely if they skipped Sheets in step 2C)
 
-### 5. Update their system prompt
-- [ ] Add booking-confirmation instruction (spell back name/email before booking)
-- [ ] Add the log_meeting_status logging instructions, using the exact three status values: `"Meeting Booked"`, `"Meeting Rescheduled"`, `"Meeting Cancelled"` — nothing else
-- [ ] Make sure nothing in the prompt references old status values from the retired Zapier setup ("new lead", "not interested", etc.)
-- [ ] Make sure the prompt doesn't name or gate on a specific meeting type/duration unless this client's Calendly account genuinely has more than one event type
-
-### 6. Test before handing off
-- [ ] Test a booking through the live agent
-- [ ] Test a reschedule
-- [ ] Test a cancellation
-- [ ] Confirm all three show up correctly in their Google Sheet, in the right color (white/yellow/red) — skip if they opted out of Sheets
-
 ## Project layout
 
 ```
