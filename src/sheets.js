@@ -28,7 +28,6 @@ function authClientFor(rawServiceAccountJson) {
   });
 }
 
-// Tenant's own service account takes priority; falls back to your shared default.
 async function getAccessToken(tenant) {
   const raw = tenant.googleServiceAccount || process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
   if (!raw) {
@@ -55,16 +54,6 @@ async function sheetsFetch(path, accessToken, options = {}) {
     throw new Error(`Google Sheets API error (${res.status}): ${body}`);
   }
   return res.json();
-}
-
-async function findRowByEmail(sheetId, email, accessToken) {
-  const data = await sheetsFetch(`/${sheetId}/values/A:F`, accessToken);
-  const rows = data.values || [];
-  const target = email.trim().toLowerCase();
-  for (let i = 1; i < rows.length; i++) { // skip header row
-    if ((rows[i][2] || '').trim().toLowerCase() === target) return i + 1; // 1-indexed
-  }
-  return null;
 }
 
 async function getGridId(sheetId, accessToken) {
@@ -95,10 +84,9 @@ async function colorRow(sheetId, rowNumber, color, accessToken) {
 }
 
 /**
- * Registers log_meeting_status on an McpServer instance, matching the same
- * registerTool/Zod/ok-fail pattern used in tools.js.
- * `getTenant` returns the current tenant object (needs sheetId, and optionally
- * googleServiceAccount).
+ * Always appends a new row — one row per event (booked / rescheduled /
+ * cancelled), even for the same contact. Nothing existing is ever
+ * modified or removed.
  */
 export function registerSheetsTool(server, getTenant) {
   server.registerTool(
@@ -106,19 +94,25 @@ export function registerSheetsTool(server, getTenant) {
     {
       title: 'Log meeting status to Google Sheets',
       description:
-        'Records a contact and their meeting status to the connected Google Sheet. Call this every time a meeting is booked, rescheduled, or cancelled, right after the corresponding Calendly action succeeds. Finds the caller by email and updates their existing row in place; creates a new row if they are not already listed.',
+        'Adds a new row to the connected Google Sheet recording this contact and their meeting status. Call this every time a meeting is booked, rescheduled, or cancelled, right after the corresponding Calendly action succeeds. Always adds a fresh row — never modifies or removes any existing row, even for a repeat contact.',
       inputSchema: {
         name: z.string().describe('Full name of the contact.'),
         phone: z.string().optional().describe('Use "N/A" if not provided.'),
         email: z.string().email().describe('Email address of the contact.'),
         status: z
           .enum(['Meeting Booked', 'Meeting Rescheduled', 'Meeting Cancelled'])
-          .describe('The current status to record for this contact.'),
-        time: z.string().describe('ISO 8601 timestamp of the meeting.')
+          .describe('The status of this specific event.'),
+        time: z.string().describe('ISO 8601 timestamp of the meeting (the new time for a reschedule, or the meeting time for a booking/cancellation).'),
+        previous_time: z
+          .string()
+          .optional()
+          .describe(
+            'For a reschedule or cancellation, the ORIGINAL start_time of the specific meeting being changed (from list_meetings/get_meeting). Required whenever the contact could have more than one meeting on record, so the log shows exactly which booking this refers to.'
+          )
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
     },
-    async ({ name, phone, email, status, time }) => {
+    async ({ name, phone, email, status, time, previous_time }) => {
       try {
         const tenant = getTenant();
         if (!tenant.sheetId) {
@@ -126,31 +120,21 @@ export function registerSheetsTool(server, getTenant) {
         }
 
         const accessToken = await getAccessToken(tenant);
-        const existingRow = await findRowByEmail(tenant.sheetId, email, accessToken);
-        const changeNote = status === 'Meeting Booked' ? '' : status.replace('Meeting ', '');
+        let changeNote = status === 'Meeting Booked' ? '' : status.replace('Meeting ', '');
+        if (previous_time) changeNote += ` (was ${previous_time})`;
         const rowValues = [name, phone || 'N/A', email, status, time, changeNote];
 
-        let rowNumber;
-        if (existingRow) {
-          await sheetsFetch(
-            `/${tenant.sheetId}/values/A${existingRow}:F${existingRow}?valueInputOption=USER_ENTERED`,
-            accessToken,
-            { method: 'PUT', body: JSON.stringify({ values: [rowValues] }) }
-          );
-          rowNumber = existingRow;
-        } else {
-          const appendRes = await sheetsFetch(
-            `/${tenant.sheetId}/values/A:F:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
-            accessToken,
-            { method: 'POST', body: JSON.stringify({ values: [rowValues] }) }
-          );
-          rowNumber = parseInt(appendRes.updates.updatedRange.match(/(\d+):/)[1], 10);
-        }
+        const appendRes = await sheetsFetch(
+          `/${tenant.sheetId}/values/A:F:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
+          accessToken,
+          { method: 'POST', body: JSON.stringify({ values: [rowValues] }) }
+        );
+        const rowNumber = parseInt(appendRes.updates.updatedRange.match(/(\d+):/)[1], 10);
 
         const color = STATUS_COLORS[status] || STATUS_COLORS['Meeting Booked'];
         await colorRow(tenant.sheetId, rowNumber, color, accessToken);
 
-        return ok(`Logged "${status}" for ${name} (${email}).`, { row: rowNumber, status });
+        return ok(`Logged "${status}" for ${name} (${email}) as a new row.`, { row: rowNumber, status });
       } catch (err) {
         return fail(err.message);
       }
