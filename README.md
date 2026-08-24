@@ -298,6 +298,58 @@ For a different service, add a client alongside `src/calendly.js` and register i
 
 ---
 
+## Onboarding a new client — step by step checklist
+
+### 1. Generate their credentials
+- [ ] Generate a new random API key for them (32+ characters), e.g. `sk_clientname_...`
+- [ ] Get their Calendly personal access token (from their Calendly account → Integrations → API & Webhooks)
+
+### 2. Google Sheet — pick one:
+
+**A. Client uses your shared service account (fast, no setup for them):**
+- [ ] Create a new Google Sheet (or have them create one)
+- [ ] Add header row: `Name | Phone | Email | Status | Time | Changes`
+- [ ] Click Share → paste in your service account's email (`...@calendly-mcp-sheets.iam.gserviceaccount.com`) → Editor → Send
+- [ ] Copy the sheet ID from the URL (the string between `/d/` and `/edit`)
+
+**B. Client brings their own service account (their data never touches your Google account):**
+- [ ] Walk them through (or do it for them): console.cloud.google.com → new project → enable Google Sheets API → create service account → generate JSON key
+- [ ] They create their own sheet with the same header row
+- [ ] They share their sheet with their own service account's email as Editor
+- [ ] Get the full JSON key contents from them (as one string) and their sheet ID
+
+**C. Client doesn't want Sheets logging at all:**
+- [ ] Skip this whole section — just don't include `sheet_id` in their tenant entry
+
+### 3. Add their entry to TENANTS_JSON (Vercel → Environment Variables)
+Edit the full value, add a comma, and append their object before the closing `]`:
+```json
+{"api_key":"sk_clientname_...","calendly_token":"their_calendly_token","label":"Client Name","sheet_id":"their_sheet_id"}
+```
+(Omit `sheet_id` entirely if they're skipping Sheets. Add `"google_service_account":"..."` too if they're on their own service account — Option B above.)
+- [ ] Double-check "Production" is checked in the environment scope, not just Preview
+- [ ] Save, let Vercel redeploy
+- [ ] Check `/health` — tenant count should go up by one, with their label showing in `keyLengths`
+
+### 4. Set up their ElevenLabs agent
+- [ ] Create/open their agent
+- [ ] Add the Calendly MCP server as a custom MCP server (same URL every time)
+- [ ] Authentication/bearer token field: their unique key from step 1 — never yours
+- [ ] Go to the server's Tools list on this agent → set approval mode to **Fine-Grained Tool Approval**
+- [ ] For each tool, choose **Disable**, **Auto-approve**, or **Requires approval** based on what this client should have access to (e.g. disable `cancel_meeting` if they don't want voice cancellations; disable `log_meeting_status` entirely if they skipped Sheets in step 2C)
+
+### 5. Update their system prompt
+- [ ] Add booking-confirmation instruction (spell back name/email before booking)
+- [ ] Add the log_meeting_status logging instructions, using the exact three status values: `"Meeting Booked"`, `"Meeting Rescheduled"`, `"Meeting Cancelled"` — nothing else
+- [ ] Make sure nothing in the prompt references old status values from the retired Zapier setup ("new lead", "not interested", etc.)
+- [ ] Make sure the prompt doesn't name or gate on a specific meeting type/duration unless this client's Calendly account genuinely has more than one event type
+
+### 6. Test before handing off
+- [ ] Test a booking through the live agent
+- [ ] Test a reschedule
+- [ ] Test a cancellation
+- [ ] Confirm all three show up correctly in their Google Sheet, in the right color (white/yellow/red) — skip if they opted out of Sheets
+
 ## Project layout
 
 ```
